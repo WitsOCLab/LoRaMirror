@@ -7,9 +7,30 @@
    THE THINGS NETWORK THINGS
 */
 
+//https://github.com/LilyGO/TTGO-LORA32/blob/master/OLED_LoRa_Receive/OLED_LoRa_Receive.ino
+
 #include <lmic.h>
 #include <hal/hal.h>
 #include <SPI.h>
+
+#define CFG_eu868 1
+#define CFG_sx1276_radio 1
+
+#define SCK 5 // GPIO5 - SX1278's SCK
+#define MISO 19 // GPIO19 - SX1278's MISO
+#define MOSI 27 // GPIO27 - SX1278's MOSI
+#define SS 18 // GPIO18 - SX1278's CS
+#define RST 14 // GPIO14 - SX1278's RESET
+#define DI0 26 // GPIO26 - SX1278's IRQ (interrupt request)
+#define BAND 868E6 // 915E6
+
+// Pin mapping
+const lmic_pinmap lmic_pins = {
+  .nss = SS,
+  .rxtx = LMIC_UNUSED_PIN,
+  .rst = RST,
+  .dio = {DI0, 33, 32},
+};
 
 static const u1_t PROGMEM APPEUI[8] = { 0x23, 0x92, 0x03, 0xD0, 0x7E, 0xD5, 0xB3, 0x70 };
 void os_getArtEui (u1_t* buf) {
@@ -60,17 +81,11 @@ const unsigned long period = 120000; //2 minute
 // Schedule TX every this many seconds (might become longer due to duty
 // cycle limitations).
 unsigned long TX_INTERVAL_IDLE = 10; 
-unsigned long TX_INTERVAL_ACTIVE = 1;
+unsigned long TX_INTERVAL_ACTIVE = 5;
 
 unsigned long txBytes = 0;
 
-// Pin mapping
-const lmic_pinmap lmic_pins = {
-  .nss = 18,
-  .rxtx = LMIC_UNUSED_PIN,
-  .rst = 14,
-  .dio = {26, 33, 32},
-};
+
 
 
 
@@ -428,23 +443,25 @@ void do_send(osjob_t* j) {
 
 void UpdateDisplay() {
   display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
   display.setCursor(0, 0);
   display.print(F("OCLab LoRaMirror v1.0"));
 
   //WiFi details
-  display.setCursor(10, 0);
+  display.setCursor(0, 10);
   if (WiFi.status() != WL_CONNECTED) {
-    display.print(String(ssid) + " :: Not Connected");
+    display.print(String(ssid) + " Down");
   } else {
-    display.print(String(ssid) + " :: " + String(WiFi.localIP()));
+    display.print(WiFi.localIP().toString());
   }
 
   //LoRa details
-  display.setCursor(20, 0);
+  display.setCursor(0, 20);
   if (loraConnected == false) {
-    display.print(F("LoRa :: Not Connected"));
+    display.print(F("LoRa Not Connected"));
   } else {
-    display.print("LoRa :: Sent " + String(txBytes) + " B");
+    display.print("LoRa Sent " + String(txBytes) + " B");
   }
 
   //TODO: Add GPS stuff...
@@ -466,18 +483,19 @@ void setup() {
     Serial.println(F("SSD1306 allocation failed"));
     displayOn = false;
   } else {
+    display.clearDisplay();
     display.setTextColor(WHITE);
     display.setTextSize(1);
-    display.clearDisplay();
     display.setCursor(0, 0);
     display.print(F("OCLab LoRaMirror v1.0"));
-    display.setCursor(10, 0);
+    display.setCursor(0, 10);
     display.print(F("Connecting to WiFi..."));
-    //display.setCursor(20, 0);
+    //display.setCursor(0, 20);
     //display.print(F("Connecting to LoRa..."));
     display.display();
 
     displayOffMillis = millis() + displayOnLifetime;
+    Serial.println("millis() now: " + String(millis()) + ". Display will turn off at " + String(displayOffMillis));
     displayOn = true;
   }
 
@@ -486,7 +504,7 @@ void setup() {
   btStop(); //turn off bluetooth
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  Serial.println(F("Trying WiFi connection"));
+  Serial.print(F("Trying WiFi connection"));
 
   // Wait for connection
   int wifiWait = 0;
@@ -503,6 +521,7 @@ void setup() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
     Serial.print("Connected to ");
     Serial.println(ssid);
     Serial.print("IP address: ");
@@ -546,8 +565,11 @@ void setup() {
   //GPS
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
+
+  Serial.println("Starting LoRa...");
   // LMIC init
   os_init();
+  
   // Reset the MAC state. Session and pending data transfers will be discarded.
   LMIC_reset();
 
@@ -587,6 +609,7 @@ void loop() {
   if (displayOn) {
     if (millis() >= displayOffMillis) {
       displayOn = false;
+      display.clearDisplay();
       display.ssd1306_command(SSD1306_DISPLAYOFF);
     }
 
