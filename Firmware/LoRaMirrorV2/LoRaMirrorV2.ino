@@ -1,4 +1,13 @@
+/*
+   Includes:
+   AccelStepper, TTN_esp32, Adafruit SSD1306
+   Use GIT: https://github.com/rgot-org/TheThingsNetwork_esp32
+*/
+
+#include <math.h>
 #include "esp32-hal-cpu.h"
+
+const String strName = F("OCLab LoRaMirror v2.2");
 
 // TTN ------------------------------------------------------------------------------------------
 
@@ -26,6 +35,10 @@ unsigned long heartbeatInterval = 10000;
 unsigned long fastHeartbeatInterval = 5000;
 unsigned long fastHeartbeatUntil = 0;
 unsigned long fastHeartbeatDwell = 30000;
+
+unsigned int ackEveryN = 100;
+const unsigned int notJoinedCounterLimit = 10;
+unsigned int notJoinedCounter = 0;
 
 // WIFI -----------------------------------------------------------------------------------------
 
@@ -55,7 +68,7 @@ const char* password = "VectorMode123";
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 
-const long displayOnLifetime = 5 * 1000 * 60; //5 min
+unsigned long displayOnLifetime = 5 * 1000 * 60; //10 min
 long displayOffMillis;
 bool displayOn = false;
 
@@ -88,17 +101,64 @@ int StepsRequired;
 AccelStepper stepper1 = AccelStepper(HALFSTEP, 13, 21, 12, 25);
 AccelStepper stepper2 = AccelStepper(HALFSTEP, 22, 0, 23, 2);
 
+const float mradPerTurn = 8; //get from datasheet
+
+int lastStepsX, lastStepsY;
+
+// GPS ------------------------------------------------------------------------------------------
+
+// GPS will do it's thing while the screen is on. If it can't find signal by then, sorry...
+
+#include <TinyGPS++.h>
+
+//GPS RX ---> PIN 35 ESP
+//GPS TX ---> PIN 34 ESP
+#define RXD2 34
+#define TXD2 35
+
+TinyGPSPlus gps;
+
+struct  GpsDataState_t {
+  double originLat = 0 ;
+  double originLon = 0 ;
+  double originAlt = 0 ;
+  double distMax = 0 ;
+  double dist = 0 ;
+  double altMax = - 999999 ;
+  double altMin = 999999 ;
+  double spdMax = 0 ;
+  double prevDist = 0 ;
+};
+GpsDataState_t gpsState = {};
+
+const double LAB_LAT = -26.1913173;
+const double LAB_LON = 28.0268707;
+
 // FUNCTIONS ------------------------------------------------------------------------------------
 
-//MOTOR 1 CLOCKWISE
-void CW1(uint8_t DemSteps, uint8_t DemScale)
+int mradToSteps(float mrad) {
+  return (int)((mrad / mradPerTurn) * STEPS_PER_OUT_REV);
+}
+
+int resultantPosToSteps(float resultantMeters, float mirrorDistance) {
+  float mrad = atan2(resultantMeters, mirrorDistance) * 1000;
+  return mradToSteps(mrad);
+}
+
+void MoveStepperOne(int StepsRequired)
 {
-  StepsRequired = DemSteps * DemScale;
-  stepper1.setCurrentPosition(0);
+  lastStepsX = StepsRequired;
   digitalWrite(BLUE_LED, HIGH);
+  stepper1.setCurrentPosition(0);
+
+  if (StepsRequired > 0) {
+    stepper1.setSpeed(1000);
+  } else {
+    stepper1.setSpeed(-1000);
+  }
+
   while (stepper1.currentPosition() != StepsRequired)
   {
-    stepper1.setSpeed(1000);
     stepper1.runSpeed();
   }
   digitalWrite(BLUE_LED, LOW);
@@ -106,31 +166,20 @@ void CW1(uint8_t DemSteps, uint8_t DemScale)
   stepper1.disableOutputs();
 }
 
-//MOTOR 1 COUNTER CLOCKWISE
-void CCW1(uint8_t DemSteps, uint8_t DemScale)
+void MoveStepperTwo(int StepsRequired)
 {
-  StepsRequired = DemSteps * DemScale;
-  stepper1.setCurrentPosition(0);
+  lastStepsY = StepsRequired;
   digitalWrite(BLUE_LED, HIGH);
-  while (stepper1.currentPosition() != StepsRequired)
-  {
-    stepper1.setSpeed(1000);
-    stepper1.runSpeed();
-  }
-  digitalWrite(BLUE_LED, LOW);
-
-  stepper1.disableOutputs();
-}
-
-//MOTOR 2 CLOCKWISE
-void CW2(uint8_t DemSteps, uint8_t DemScale)
-{
-  StepsRequired = DemSteps * DemScale;
   stepper2.setCurrentPosition(0);
-  digitalWrite(BLUE_LED, HIGH);
+
+  if (StepsRequired > 0) {
+    stepper2.setSpeed(1000);
+  } else {
+    stepper2.setSpeed(-1000);
+  }
+
   while (stepper2.currentPosition() != StepsRequired)
   {
-    stepper2.setSpeed(1000);
     stepper2.runSpeed();
   }
   digitalWrite(BLUE_LED, LOW);
@@ -138,21 +187,6 @@ void CW2(uint8_t DemSteps, uint8_t DemScale)
   stepper2.disableOutputs();
 }
 
-//MOTOR 2 COUNTER CLOCKWISE
-void CCW2(uint8_t DemSteps, uint8_t DemScale)
-{
-  StepsRequired = DemSteps * DemScale;
-  stepper2.setCurrentPosition(0);
-  digitalWrite(BLUE_LED, HIGH);
-  while (stepper2.currentPosition() != StepsRequired)
-  {
-    stepper2.setSpeed(1000);
-    stepper2.runSpeed();
-  }
-  digitalWrite(BLUE_LED, LOW);
-
-  stepper2.disableOutputs();
-}
 
 void ToggleBlueLED() {
   digitalWrite(BLUE_LED, !digitalRead(BLUE_LED));
@@ -207,11 +241,17 @@ void UpdateDisplay(bool immediate = true) {
 
   if ((immediate) || (millis() >= nextUpdate)) {
 
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiStatus = "WiFi: " + WiFi.localIP().toString();
+    } else {
+      wifiStatus = "WiFi Disconnected";
+    }
+
     display.clearDisplay();
     display.setTextColor(WHITE);
     display.setTextSize(1);
     display.setCursor(0, 0);
-    display.print(F("OCLab LoRaMirror v1.0"));
+    display.print(strName);
 
     //WiFi details
     display.setCursor(0, 10);
@@ -223,6 +263,19 @@ void UpdateDisplay(bool immediate = true) {
 
     display.setCursor(0, 30);
     display.print(loraStatus2);
+
+    display.setCursor(0, 40);
+    display.print("Last: (" + String(lastStepsX) + "," + String(lastStepsY) + ")");
+
+    if (gps.location.isValid()) {
+      display.setCursor(0, 50);
+      display.print("GPS: " + String(gps.location.lat()) + ", " + String(gps.location.lng()));
+    } else {
+      display.setCursor(0, 50);
+      char sz[32];
+      sprintf(sz, "%02d:%02d:%02d ", gps.time.hour(), gps.time.minute(), gps.time.second());
+      display.print("GPS Time: " + String(sz));
+    }
 
     display.display();
 
@@ -243,25 +296,47 @@ void message(const uint8_t* payload, size_t size, int rssi)
 
   loraStatus2 = "Last RSSI: " + String(rssi) + " dB";
 
-  uint8_t DIR = payload[0];
-  uint8_t STEPS = payload[1];
-  uint8_t MUL = payload[2];
+  uint8_t command = payload[0]; //command
 
-  if (DIR == 1) //MOTOR 1
-  {
-    CW1(STEPS, MUL);
-  }
-  if (DIR == 2) //MOTOR 1
-  {
-    CCW1(STEPS, MUL);
-  }
-  if (DIR == 3) //MOTOR 2
-  {
-    CW2(STEPS, MUL);
-  }
-  if (DIR == 4) //MOTOR 2
-  {
-    CCW2(STEPS, MUL);
+  /* TTN steps encoder:
+    var myVal = 20000;
+    var bytes = [];
+    bytes[0] = (myVal & 0xFF00) >> 8;
+    bytes[1] = (myVal & 0x00FF);
+  */
+  uint16_t steps;
+  int16_t resultantmm;
+  uint16_t distancecm;
+
+ // Serial.println(String(payload[0],HEX) + " " + String(payload[1],HEX));
+
+  switch (command) {
+    case 1: //tip steps
+      steps = ((uint16_t)(payload[2]) << 8) + (uint16_t)payload[1];
+      MoveStepperOne(steps);
+      break;
+    case 2: //-tip steps
+      steps = ((unsigned int)(payload[2]) << 8) + payload[1];
+      MoveStepperOne(-steps);
+      break;
+    case 3: //tilt steps
+      steps = ((unsigned int)(payload[2]) << 8) + payload[1];
+      MoveStepperTwo(steps);
+      break;
+    case 4: //-tilt steps
+      steps = ((unsigned int)(payload[2]) << 8) + payload[1];
+      MoveStepperTwo(-steps);
+      break;
+    case 5: //tip distance
+      resultantmm = ((int)(payload[2]) << 8) + payload[1];
+      distancecm = ((int)(payload[2]) << 8) + payload[1];
+      MoveStepperOne(resultantPosToSteps((float)resultantmm / 1000.0, (float)distancecm / 100.0));
+      break;
+    case 6: //tilt distance
+      resultantmm = ((int)(payload[2]) << 8) + payload[1];
+      distancecm = ((int)(payload[2]) << 8) + payload[1];
+      MoveStepperTwo(resultantPosToSteps((float)resultantmm / 1000.0, (float)distancecm / 100.0));
+      break;
   }
 
   StartFastHeartbeat();
@@ -270,10 +345,10 @@ void message(const uint8_t* payload, size_t size, int rssi)
 void setup()
 {
   setCpuFrequencyMhz(80);
-  
+
   Serial.begin(115200);
   delay(1000);
-  Serial.println("OCLab LoRaMirror");
+  Serial.println(strName);
 
   pinMode(BLUE_LED, OUTPUT);
 
@@ -322,6 +397,9 @@ void setup()
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    displayOnLifetime = 60 * 1000 * 1000; //1h
+    displayOffMillis = millis() + displayOnLifetime; //update
+
     Serial.println();
     Serial.print("Connected to ");
     Serial.println(ssid);
@@ -390,6 +468,10 @@ void setup()
   UpdateDisplay();
   digitalWrite(BLUE_LED, LOW); //LED off means all good.
   ttn.showStatus();
+
+  //GPS
+  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+
 }
 
 void StartFastHeartbeat() {
@@ -402,8 +484,9 @@ void SendHeartbeat() {
   if (millis() >= nextHeartbeat) {
     FlashBlueLED(100);
     //ttn.sendBytes(nullp, 1);
-    ttn.poll();
     totalMessages++;
+
+    ttn.poll(1, (totalMessages % ackEveryN) == 0);
 
     if (fastHeartbeatUntil == 0) {
       nextHeartbeat = millis() + heartbeatInterval;
@@ -413,6 +496,20 @@ void SendHeartbeat() {
         fastHeartbeatUntil = 0; //stop fast mode
       }
     }
+  }
+}
+
+void ProcessGPS() {
+  // If we get there, GPS has some valid data.
+  if (gps.location.isValid()) {
+    Serial.println("GPS Location: " + String(gps.location.lat()) + ", " + String(gps.location.lng()));
+    Serial.println("Altitude: " + String(gps.altitude.meters()) + " m");
+
+    double distanceToLabMeters = TinyGPSPlus::distanceBetween(gps.location.lat(), gps.location.lng(), LAB_LAT, LAB_LON);
+    Serial.println("Distance to lab: " + String(distanceToLabMeters) + " m");
+
+    double courseToLab = TinyGPSPlus::courseTo(gps.location.lat(), gps.location.lng(), LAB_LAT, LAB_LON);
+    Serial.println("Course to lab: " + String(courseToLab) + "°N");
   }
 }
 
@@ -428,11 +525,28 @@ void loop()
       displayOn = false;
       display.clearDisplay();
       display.ssd1306_command(SSD1306_DISPLAYOFF);
+
+      //also turn off wifi
+
+      if (WiFi.status() == WL_CONNECTED) {
+        WiFi.mode(WIFI_OFF);
+      }
+    }
+
+    //GPS
+    while (Serial2.available() > 0)
+    {
+      char r = Serial2.read();
+      Serial.print(r);
+      if (gps.encode(r)) {
+        ProcessGPS();
+      }
     }
 
     //Update OLED
     UpdateDisplay(false);
   }
+
 
   if (WiFi.status() == WL_CONNECTED) {
     ArduinoOTA.handle();
@@ -441,7 +555,12 @@ void loop()
   SendHeartbeat();
 
   if (ttn.isJoined() == false) {
-    delay(60000); //wait 60s then restart
-    ESP.restart();
+    notJoinedCounter++;
+    delay(5000);
+    if (notJoinedCounter >= notJoinedCounterLimit) {
+      ESP.restart();
+    }
+  } else {
+    notJoinedCounter = 0;
   }
 }
