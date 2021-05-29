@@ -201,6 +201,12 @@
 <text x="53.29555" y="18.888075" size="0.6096" layer="21" font="vector" ratio="15">github.com/WitsOCLab/LoRaMirror</text>
 <text x="53.34" y="16.51" size="1.778" layer="21" font="vector" ratio="15">LoRaBoard v1.0</text>
 <text x="3.81" y="26.67" size="0.6096" layer="25" font="vector" ratio="15" rot="R180" align="center">RPi Pico</text>
+<polygon width="0.254" layer="41">
+<vertex x="95.25" y="24.13"/>
+<vertex x="95.25" y="15.9131"/>
+<vertex x="86.9823" y="15.9131"/>
+<vertex x="86.9823" y="24.13"/>
+</polygon>
 </plain>
 <libraries>
 <library name="diy-modules">
