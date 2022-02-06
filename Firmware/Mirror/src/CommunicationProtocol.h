@@ -1,4 +1,7 @@
 #pragma once
+
+#define DEBUG
+
 #include <Arduino.h>
 
 #define ModeMask 0b11 << 6
