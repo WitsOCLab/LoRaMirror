@@ -5,6 +5,8 @@
 #include <LoRa.h>
 #include <AsyncTimer.h>
 #include <AccelStepper.h>
+#include <pico/stdlib.h>
+//#include <EEPROM.h>
 
 #include "CommunicationProtocol.h"
 
@@ -16,6 +18,22 @@ AccelStepper stepper2(AccelStepper::FULL4WIRE, 7, 11, 9, 13);
 #define NSS 5
 #define RST 17
 #define DIO 16
+#define LED_PIN 14
+#define BATTERY_PIN A0
+
+// struct Endstops
+// {
+//     int xMin;
+//     int xMax;
+//     int yMin;
+//     int yMax;
+// };
+
+// struct Position
+// {
+//     int x;
+//     int y;
+// };
 
 enum class State
 {
@@ -27,12 +45,16 @@ enum class State
     CALIBRATE
 };
 
+// Endstops endstops;
+// Position position;
+
 State state = State::SLEEP;
 
 int8_t received[2];
 int x = 0;
 int y = 0;
 bool slowMode = false;
+word batteryReading = 0;
 
 int sleepTimer = 0;
 int timeoutTimer = 0;
@@ -65,7 +87,9 @@ void sleepRadio()
 {
     if (state == State::SLEEP)
     {
+#ifdef DEBUG
         Serial.println("Sleeping Radio");
+#endif
         LoRa.sleep();
     }
 }
@@ -73,7 +97,7 @@ void sleepRadio()
 void sendPosition()
 {
     int xp = stepper.currentPosition();
-    int yp = stepper2.currentPosition();
+    int yp = -stepper2.currentPosition();
     int8_t xpos = int8_t(map(xp, xMin, xMax, -100, 100));
     int8_t ypos = int8_t(map(yp, yMin, yMax, -100, 100));
 
@@ -115,8 +139,33 @@ void handleState()
     }
 }
 
+word getBatteryVoltage()
+{
+    batteryReading = analogRead(BATTERY_PIN);
+#ifdef DEBUG
+    Serial.print("Battery: ");
+    Serial.println(batteryReading);
+#endif
+    return batteryReading;
+}
+
 void sendHeartbeat()
 {
+    // if (state == State::SLEEP)
+    // {
+    //     set_sys_clock_48mhz();
+    //     delay(2);
+// #ifdef DEBUG
+//         Serial.println("Clock set to 48MHz");
+// #endif
+//         LoRa.idle();
+//     }
+    digitalWrite(LED_PIN, HIGH);
+
+    if (comms.getHeartbeatIndex() == 0)
+    {
+        comms.setHeartbeatData(getBatteryVoltage());
+    }
     LoRa.beginPacket();
     LoRa.write(comms.getHeartbeat());
     LoRa.endPacket();
@@ -125,6 +174,11 @@ void sendHeartbeat()
     {
         delay(150);
         sleepRadio();
+        digitalWrite(LED_PIN, LOW);
+#ifdef DEBUG
+        Serial.println("Decreasing Clock Speed");
+#endif
+        // set_sys_clock_khz(10000, false); // Set System clock to 10 MHz, sys_clock_khz(10000, true); did not work for me
     }
 }
 
@@ -165,7 +219,7 @@ void transitionState(State newState)
                 comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::ACTIVE);
             }
             state = State::ACTIVE;
-            digitalWrite(LED_BUILTIN, HIGH);
+            digitalWrite(LED_PIN, HIGH);
             t.cancel(sleepTimer);
             timeoutTimer = t.setTimeout(controlTimeout, 500);
 #ifdef DEBUG
@@ -182,7 +236,15 @@ void transitionState(State newState)
                 comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::ACTIVE);
             }
             state = State::IDLE;
-            digitalWrite(LED_BUILTIN, HIGH);
+            digitalWrite(LED_PIN, HIGH);
+            // endstops.xMin = xMin;
+            // endstops.xMax = xMax;
+            // endstops.yMin = yMin;
+            // endstops.yMax = yMax;
+            // EEPROM.put(0, endstops);
+            // position.x = stepper.currentPosition();
+            // position.y = stepper2.currentPosition();
+            // EEPROM.put(200, position);
             sleepTimer = t.setTimeout(sleepTimeout, 30000);
             t.cancel(timeoutTimer);
             t.setTimeout([]()
@@ -195,11 +257,12 @@ void transitionState(State newState)
         case State::SLEEP:
             comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::INACTIVE);
             state = State::SLEEP;
-            digitalWrite(LED_BUILTIN, LOW);
+            digitalWrite(LED_PIN, LOW);
             t.cancel(timeoutTimer);
             t.cancel(sleepTimer);
             t.cancel(positionTimer);
             t.reset(heartbeatTimer);
+            //EEPROM.commit();
             sendHeartbeat();
 #ifdef DEBUG
             Serial.println("Transitioned to SLEEP");
@@ -209,7 +272,7 @@ void transitionState(State newState)
             comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
             comms.setHeartbeatConfigIndex(0);
             state = State::CONFIGURE;
-            digitalWrite(LED_BUILTIN, LOW);
+            digitalWrite(LED_PIN, LOW);
             t.cancel(timeoutTimer);
             t.cancel(sleepTimer);
             t.cancel(positionTimer);
@@ -223,7 +286,7 @@ void transitionState(State newState)
             comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
             comms.setHeartbeatConfigIndex(0b0001);
             state = State::CALIBRATE;
-            digitalWrite(LED_BUILTIN, HIGH);
+            digitalWrite(LED_PIN, HIGH);
             t.cancel(timeoutTimer);
             t.cancel(sleepTimer);
             t.cancel(positionTimer);
@@ -299,12 +362,12 @@ void handleMessage()
                 if (slowMode)
                 {
                     stepper.setSpeed(0.1 * x);
-                    stepper2.setSpeed(0.1 * y);
+                    stepper2.setSpeed(-0.1 * y);
                 }
                 else
                 {
                     stepper.setSpeed(4 * x);
-                    stepper2.setSpeed(4 * y);
+                    stepper2.setSpeed(-4 * y);
                 }
 
                 if (x == 0 && y == 0)
@@ -367,7 +430,7 @@ void handleMessage()
                 x = received[0];
                 y = received[1];
                 stepper.setSpeed(4 * x);
-                stepper2.setSpeed(4 * y);
+                stepper2.setSpeed(-4 * y);
                 if (x == 0 and y == 0)
                 {
                     if (stepper.currentPosition() < xMin)
@@ -405,11 +468,12 @@ void handleMessage()
 
 void setup()
 {
+#ifdef DEBUG
     Serial.begin(9600);
-
     Serial.println("LoRa Receiver");
+#endif
 
-    pinMode(LED_BUILTIN, OUTPUT);
+    pinMode(LED_PIN, OUTPUT);
 
     // Configure LoRa
     SPI.setRX(4);
@@ -419,15 +483,41 @@ void setup()
     LoRa.setPins(NSS, RST, DIO);
     if (!LoRa.begin(833E6))
     {
-        #ifdef DEBUG
+#ifdef DEBUG
         Serial.println("Starting LoRa failed!");
-        #endif
+#endif
         while (1)
             ;
     }
     LoRa.setTxPower(20);
     LoRa.onReceive(onReceive);
     LoRa.receive();
+
+//     EEPROM.begin(256);
+//     EEPROM.get(0, endstops);
+//     xMax = endstops.xMax;
+//     yMax = endstops.yMax;
+//     xMin = endstops.xMin;
+//     yMin = endstops.yMin;
+// #ifdef DEBUG
+//     Serial.print("Endstops loaded from EEPROM: X: ");
+//     Serial.print(xMin);
+//     Serial.print(" - ");
+//     Serial.print(xMax);
+//     Serial.print(" Y: ");
+//     Serial.print(yMin);
+//     Serial.print(" - ");
+//     Serial.println(yMax);
+// #endif
+//     EEPROM.get(200, position);
+//     stepper.setCurrentPosition(position.x);
+//     stepper2.setCurrentPosition(position.y);
+// #ifdef DEBUG
+//     Serial.print("Position loaded from EEPROM: X: ");
+//     Serial.print(position.x);
+//     Serial.print(" Y: ");
+//     Serial.println(position.y);
+//#endif
 
     // Configure Steppers
     stepper.setMaxSpeed(500);
