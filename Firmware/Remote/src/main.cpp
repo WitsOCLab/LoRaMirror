@@ -6,6 +6,9 @@
 #include <AsyncTimer.h>
 #include <Yabl.h>
 
+#include "CommunicationProtocol.h"
+
+CommunicationProtocol comms;
 AsyncTimer t;
 
 // some variables
@@ -192,40 +195,38 @@ Button button;
 
 void transitionState(State newState);
 
-void parseHeartbeat(byte heartbeat)
-{
-  heartbeatMode = (HeartbeatMode)((heartbeat & ModeMask) >> 6);
-  heartbeatIndex = (heartbeat & HeartbeatIndexMask) >> 4;
-  if (heartbeatMode != HeartbeatMode::CONFIGURE)
-  {
-    heartbeatNibble[heartbeatIndex] = heartbeat & DataNibbleMask;
-  }
-  else
-  {
-    configIndex = heartbeat & DataNibbleMask;
-  }
-  Serial.print("Mode: ");
-  Serial.print(int(heartbeatMode), BIN);
-  Serial.print(" Index: ");
-  Serial.print(heartbeatIndex);
-  if (heartbeatMode != HeartbeatMode::CONFIGURE)
-  {
-    Serial.print(" Data: ");
-    Serial.println(heartbeatNibble[heartbeatIndex], BIN);
-  }
-  else
-  {
-    Serial.print(" Config Index: ");
-    Serial.println(configIndex);
-  }
-}
+// void parseHeartbeat(byte heartbeat)
+// {
+//   heartbeatMode = (HeartbeatMode)((heartbeat & ModeMask) >> 6);
+//   heartbeatIndex = (heartbeat & HeartbeatIndexMask) >> 4;
+//   if (heartbeatMode != HeartbeatMode::CONFIGURE)
+//   {
+//     heartbeatNibble[heartbeatIndex] = heartbeat & DataNibbleMask;
+//   }
+//   else
+//   {
+//     configIndex = heartbeat & DataNibbleMask;
+//   }
+//   Serial.print("Mode: ");
+//   Serial.print(int(heartbeatMode), BIN);
+//   Serial.print(" Index: ");
+//   Serial.print(heartbeatIndex);
+//   if (heartbeatMode != HeartbeatMode::CONFIGURE)
+//   {
+//     Serial.print(" Data: ");
+//     Serial.println(heartbeatNibble[heartbeatIndex], BIN);
+//   }
+//   else
+//   {
+//     Serial.print(" Config Index: ");
+//     Serial.println(configIndex);
+//   }
+// }
 
-void sendHeartbeat(byte data = 0)
+void sendHeartbeat()
 {
-  statusFlags &= ~DataNibbleMask;
-  statusFlags |= data;
   LoRa.beginPacket();
-  LoRa.write(statusFlags);
+  LoRa.write(comms.getHeartbeat());
   LoRa.endPacket();
   LoRa.receive();
 }
@@ -250,7 +251,7 @@ void handleMessage()
     // Serial.println(message[0], BIN);
     if (receivedSize == 1)
     {
-      parseHeartbeat(message[0]);
+      comms.parseHeartbeat(message[0]);
     }
     switch (state)
     {
@@ -261,15 +262,15 @@ void handleMessage()
     case State::ACTIVE:
       if (receivedSize == 1)
       {
-        switch (heartbeatMode)
+        switch (comms.getRemoteHeartbeatMode())
         {
-        case HeartbeatMode::INACTIVE:
+        case CommunicationProtocol::HeartbeatMode::INACTIVE:
           transitionState(State::IDLE);
           break;
-        case HeartbeatMode::ACTIVE:
+        case CommunicationProtocol::HeartbeatMode::ACTIVE:
           slowMode = false;
           break;
-        case HeartbeatMode::SLOW:
+        case CommunicationProtocol::HeartbeatMode::SLOW:
           slowMode = true;
           break;
         }
@@ -297,48 +298,41 @@ void transitionState(State newState)
   switch (newState)
   {
   case State::ACTIVE:
-    statusFlags &= ~ModeMask;
     if (slowMode)
     {
-      statusFlags |= SlowMode;
+      comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::SLOW);
     }
     else
     {
-      statusFlags |= ActiveMode;
+      comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::ACTIVE);
     }
     state = State::ACTIVE;
     break;
   case State::IDLE:
-    statusFlags &= ~ModeMask;
-    statusFlags |= InactiveMode;
+    comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::INACTIVE);
     state = State::IDLE;
     break;
   case State::CONNECTING:
-    statusFlags &= ~ModeMask;
-    statusFlags |= ActiveMode;
+    comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::ACTIVE);
     state = State::CONNECTING;
     break;
   case State::SETTINGSMENU:
-    statusFlags &= ~ModeMask;
-    statusFlags |= ConfigureMode;
+    comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
     state = State::SETTINGSMENU;
     sendHeartbeat();
     break;
   case State::SETTINGADJUST:
-    statusFlags &= ~ModeMask;
-    statusFlags |= ConfigureMode;
+    comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
     state = State::SETTINGADJUST;
     break;
   case State::SETTINGAPPLY:
-    statusFlags &= ~ModeMask;
-    statusFlags |= ConfigureMode;
+    comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
     state = State::SETTINGAPPLY;
     break;
   case State::CALIBRATE:
-    statusFlags &= ~ModeMask;
-    statusFlags |= ConfigureMode;
+    comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
+    comms.setHeartbeatConfigIndex(0b0001);
     state = State::CALIBRATE;
-    sendHeartbeat(0b0001);
     break;
   }
 }
@@ -601,7 +595,7 @@ void displaySettingApply()
     break;
   case 2:
     u8g2.drawStr(0, 20, "Saving");
-    sendHeartbeat(0b1111);
+    comms.setHeartbeatConfigIndex(0b1111);
     t.setTimeout([]()
                  { transitionState(State::SETTINGSMENU); },
                  1000);
