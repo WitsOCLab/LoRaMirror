@@ -20,7 +20,8 @@ byte CommunicationProtocol::getHeartbeat()
     {
         statusByte |= heartbeatNibble[heartbeatIndex] & DataNibbleMask;
     }
-    else{
+    else
+    {
         statusByte |= configIndex & DataNibbleMask;
     }
 
@@ -31,10 +32,10 @@ byte CommunicationProtocol::getHeartbeat()
         heartbeatIndex = 0;
     }
 
-    #ifdef DEBUG
+#ifdef DEBUG
     Serial.print("Heartbeat sent: ");
     Serial.println(statusByte, BIN);
-    #endif
+#endif
 
     return statusByte;
 }
@@ -43,38 +44,59 @@ void CommunicationProtocol::parseHeartbeat(byte heartbeat)
 {
     remoteHeartbeatMode = (HeartbeatMode)((heartbeat & ModeMask) >> 6);
     remoteHeartbeatIndex = (heartbeat & HeartbeatIndexMask) >> 4;
-    #ifdef DEBUG
+#ifdef DEBUG
     Serial.print("Heartbeat received: ");
     Serial.print("Mode: ");
     Serial.print(int(remoteHeartbeatMode));
     Serial.print(" Index: ");
     Serial.print(remoteHeartbeatIndex);
-    #endif
+#endif
     if (remoteHeartbeatMode != HeartbeatMode::CONFIGURE)
     {
         remoteHeartbeatNibble[remoteHeartbeatIndex] = heartbeat & DataNibbleMask;
-        #ifdef DEBUG
+#ifdef DEBUG
         Serial.print(" Data: ");
         Serial.println(remoteHeartbeatNibble[remoteHeartbeatIndex], BIN);
-        #endif
+#endif
+        if (remoteHeartbeatIndex != expectedRemoteHeartbeatIndex)
+        {
+#ifdef DEBUG
+            Serial.print("Heartbeat index mismatch: ");
+            Serial.print(remoteHeartbeatIndex);
+            Serial.print(" != ");
+            Serial.println(expectedRemoteHeartbeatIndex);
+#endif
+            expectedRemoteHeartbeatIndex = remoteHeartbeatIndex;
+            badData = true;
+        }
         if (remoteHeartbeatIndex >= 3)
         {
             remoteHeartbeatData = 0;
+            expectedRemoteHeartbeatIndex = 0;
             for (int i = 0; i <= 3; i++)
             {
                 remoteHeartbeatData <<= 4;
                 remoteHeartbeatData |= remoteHeartbeatNibble[i];
             }
         }
+        else if (remoteHeartbeatIndex == 0)
+        {
+            expectedRemoteHeartbeatIndex = 1;
+            badData = false;
+        }
+        else
+        {
+            expectedRemoteHeartbeatIndex = remoteHeartbeatIndex + 1;
+        }
     }
     else
     {
         remoteConfigIndex = heartbeat & DataNibbleMask;
 
-        #ifdef DEBUG
+#ifdef DEBUG
         Serial.print(" Config Index: ");
         Serial.println(remoteConfigIndex);
-        #endif
+#endif
     }
 }
 
@@ -105,7 +127,17 @@ void CommunicationProtocol::setHeartbeatData(word data)
 
 word CommunicationProtocol::getHeartbeatData()
 {
-    return heartbeatData;
+    if (badData)
+    {
+#ifdef DEBUG
+        Serial.println("Bad data");
+#endif
+        return 0;
+    }
+    else
+    {
+        return heartbeatData;
+    }
 }
 
 void CommunicationProtocol::setHeartbeatConfigIndex(int index)
@@ -161,10 +193,10 @@ word CommunicationProtocol::getControlPacket(int x, int y)
     word packet = char(x) << 8;
     packet |= char(y);
 
-    #ifdef DEBUG
+#ifdef DEBUG
     Serial.print("Control packet sent: ");
     Serial.println(packet, BIN);
-    #endif
+#endif
     return packet;
 }
 
@@ -185,10 +217,10 @@ word CommunicationProtocol::getConfigPacket(int configValue, int configIndex)
     }
     packet |= char(configValue);
 
-    #ifdef DEBUG
+#ifdef DEBUG
     Serial.print("Config packet sent: ");
     Serial.println(packet, BIN);
-    #endif
+#endif
 
     return packet;
 }

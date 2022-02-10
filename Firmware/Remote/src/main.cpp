@@ -30,6 +30,7 @@ bool slowMode = false;
 int receivedSize = 0;
 int xPos = 0;
 int yPos = 0;
+int mirrorBattery = 0;
 
 enum class HeartbeatMode
 {
@@ -425,7 +426,7 @@ void stickClicked()
   switch (state)
   {
   case State::IDLE:
-    transitionState(State::ACTIVE);
+    transitionState(State::CONNECTING);
     break;
   case State::ACTIVE:
     slowMode = !slowMode;
@@ -470,6 +471,11 @@ void displayIdle()
   }
   u8g2.setCursor(80, 42);
   u8g2.print(battery_);
+  u8g2.setCursor(80, 52);
+  if (comms.getRemoteHeartbeatData() != 0){
+    mirrorBattery = comms.getRemoteHeartbeatData();
+  }
+  u8g2.print(mirrorBattery);
 }
 
 void displayActive()

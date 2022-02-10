@@ -52,4 +52,6 @@ private:
     int remoteConfigIndex = 0;
     word heartbeatData = 0;
     word remoteHeartbeatData = 0;
+    int expectedRemoteHeartbeatIndex = 0;
+    bool badData = false;
 };
