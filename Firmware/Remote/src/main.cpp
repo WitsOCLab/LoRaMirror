@@ -334,6 +334,7 @@ void transitionState(State newState)
     comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
     comms.setHeartbeatConfigIndex(0b0001);
     state = State::CALIBRATE;
+    sendHeartbeat();
     break;
   }
 }

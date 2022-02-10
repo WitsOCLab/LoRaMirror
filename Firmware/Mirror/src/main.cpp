@@ -6,7 +6,7 @@
 #include <AsyncTimer.h>
 #include <AccelStepper.h>
 #include <pico/stdlib.h>
-//#include <EEPROM.h>
+#include <EEPROM.h>
 
 #include "CommunicationProtocol.h"
 
@@ -18,22 +18,23 @@ AccelStepper stepper2(AccelStepper::FULL4WIRE, 7, 11, 9, 13);
 #define NSS 5
 #define RST 17
 #define DIO 16
-#define LED_PIN 14
+//#define LED_PIN 14
+#define LED_PIN 25
 #define BATTERY_PIN A0
 
-// struct Endstops
-// {
-//     int xMin;
-//     int xMax;
-//     int yMin;
-//     int yMax;
-// };
+struct Endstops
+{
+    int xMin;
+    int xMax;
+    int yMin;
+    int yMax;
+};
 
-// struct Position
-// {
-//     int x;
-//     int y;
-// };
+struct Position
+{
+    int x;
+    int y;
+};
 
 enum class State
 {
@@ -45,8 +46,8 @@ enum class State
     CALIBRATE
 };
 
-// Endstops endstops;
-// Position position;
+Endstops endstops = {-4096, 4096, -4096, 4096};
+Position position = {0, 0};
 
 State state = State::SLEEP;
 
@@ -64,14 +65,12 @@ int positionTimer = 0;
 int receivedPacketSize = 0;
 bool messageReceived = false;
 
-int xMin = -4096;
-int xMax = 4096;
-int yMin = -4096;
-int yMax = 4096;
+int positionLocation = 0;
+int endstopLocation = positionLocation + sizeof(position);
 
-#define ModeMask 0b11 << 6
-#define HeartbeatIndexMask 0b11 << 4
-#define DataNibbleMask 0b1111
+// #define ModeMask 0b11 << 6
+// #define HeartbeatIndexMask 0b11 << 4
+// #define DataNibbleMask 0b1111
 
 void onReceive(int packetSize)
 {
@@ -94,12 +93,47 @@ void sleepRadio()
     }
 }
 
+void retreiveEEPROMData()
+{
+    EEPROM.get(positionLocation, position);
+    EEPROM.get(endstopLocation, endstops);
+#ifdef DEBUG
+    Serial.print("Retreived EEPROM data: ");
+    Serial.print("Position: ");
+    Serial.print(position.x);
+    Serial.print(", ");
+    Serial.println(position.y);
+    Serial.print("Endstops: ");
+    Serial.print(endstops.xMin);
+    Serial.print(" ");
+    Serial.print(endstops.xMax);
+    Serial.print(", ");
+    Serial.print(endstops.yMin);
+    Serial.print(" ");
+    Serial.println(endstops.yMax);
+#endif
+}
+
 void sendPosition()
 {
     int xp = stepper.currentPosition();
     int yp = -stepper2.currentPosition();
-    int8_t xpos = int8_t(map(xp, xMin, xMax, -100, 100));
-    int8_t ypos = int8_t(map(yp, yMin, yMax, -100, 100));
+#ifdef DEBUG
+    Serial.print("Position: ");
+    Serial.print(xp);
+    Serial.print(", ");
+    Serial.println(yp);
+    Serial.print("Endstops: ");
+    Serial.print(endstops.xMin);
+    Serial.print(", ");
+    Serial.print(endstops.xMax);
+    Serial.print(", ");
+    Serial.print(endstops.yMin);
+    Serial.print(", ");
+    Serial.println(endstops.yMax);
+#endif
+    int8_t xpos = int8_t(map(xp, endstops.xMin, endstops.xMax, -100, 100));
+    int8_t ypos = int8_t(map(yp, endstops.yMin, endstops.yMax, -100, 100));
 
 #ifdef DEBUG
     Serial.print("Sending Position: ");
@@ -124,11 +158,11 @@ void handleState()
         stepper2.disableOutputs();
         break;
     case State::ACTIVE:
-        if (!(stepper.currentPosition() >= xMax && stepper.speed() > 0) && !(stepper.currentPosition() <= xMin && stepper.speed() < 0))
+        if (!(stepper.currentPosition() >= endstops.xMax && stepper.speed() > 0) && !(stepper.currentPosition() <= endstops.xMin && stepper.speed() < 0))
         {
             stepper.runSpeed();
         }
-        if (!(stepper2.currentPosition() >= yMax && stepper2.speed() > 0) && !(stepper2.currentPosition() <= yMin && stepper2.speed() < 0))
+        if (!(-stepper2.currentPosition() >= endstops.yMax && stepper2.speed() < 0) && !(-stepper2.currentPosition() <= endstops.yMin && stepper2.speed() > 0))
         {
             stepper2.runSpeed();
         }
@@ -151,15 +185,6 @@ word getBatteryVoltage()
 
 void sendHeartbeat()
 {
-    // if (state == State::SLEEP)
-    // {
-    //     set_sys_clock_48mhz();
-    //     delay(2);
-// #ifdef DEBUG
-//         Serial.println("Clock set to 48MHz");
-// #endif
-//         LoRa.idle();
-//     }
     digitalWrite(LED_PIN, HIGH);
 
     if (comms.getHeartbeatIndex() == 0)
@@ -175,10 +200,6 @@ void sendHeartbeat()
         delay(150);
         sleepRadio();
         digitalWrite(LED_PIN, LOW);
-#ifdef DEBUG
-        Serial.println("Decreasing Clock Speed");
-#endif
-        // set_sys_clock_khz(10000, false); // Set System clock to 10 MHz, sys_clock_khz(10000, true); did not work for me
     }
 }
 
@@ -237,14 +258,10 @@ void transitionState(State newState)
             }
             state = State::IDLE;
             digitalWrite(LED_PIN, HIGH);
-            // endstops.xMin = xMin;
-            // endstops.xMax = xMax;
-            // endstops.yMin = yMin;
-            // endstops.yMax = yMax;
-            // EEPROM.put(0, endstops);
-            // position.x = stepper.currentPosition();
-            // position.y = stepper2.currentPosition();
-            // EEPROM.put(200, position);
+            position.x = stepper.currentPosition();
+            position.y = -stepper2.currentPosition();
+            EEPROM.put(positionLocation, position);
+            EEPROM.put(endstopLocation, endstops);
             sleepTimer = t.setTimeout(sleepTimeout, 30000);
             t.cancel(timeoutTimer);
             t.setTimeout([]()
@@ -262,7 +279,9 @@ void transitionState(State newState)
             t.cancel(sleepTimer);
             t.cancel(positionTimer);
             t.reset(heartbeatTimer);
-            //EEPROM.commit();
+            EEPROM.put(positionLocation, position);
+            EEPROM.put(endstopLocation, endstops);
+            EEPROM.commit();
             sendHeartbeat();
 #ifdef DEBUG
             Serial.println("Transitioned to SLEEP");
@@ -274,9 +293,9 @@ void transitionState(State newState)
             state = State::CONFIGURE;
             digitalWrite(LED_PIN, LOW);
             t.cancel(timeoutTimer);
-            t.cancel(sleepTimer);
             t.cancel(positionTimer);
             t.reset(heartbeatTimer);
+            t.reset(sleepTimer);
             sendHeartbeat();
 #ifdef DEBUG
             Serial.println("Transitioned to CONFIGURE");
@@ -288,14 +307,14 @@ void transitionState(State newState)
             state = State::CALIBRATE;
             digitalWrite(LED_PIN, HIGH);
             t.cancel(timeoutTimer);
-            t.cancel(sleepTimer);
             t.cancel(positionTimer);
             t.reset(heartbeatTimer);
+            t.reset(sleepTimer);
 
-            xMax = 0;
-            yMax = 0;
-            xMin = 0;
-            yMin = 0;
+            endstops.xMax = 0;
+            endstops.yMax = 0;
+            endstops.xMin = 0;
+            endstops.yMin = 0;
 
             stepper.setCurrentPosition(0);
             stepper2.setCurrentPosition(0);
@@ -424,6 +443,10 @@ void handleMessage()
 #endif
                     transitionState(State::IDLE);
                 }
+                else if (comms.getRemoteHeartbeatMode() == CommunicationProtocol::HeartbeatMode::ACTIVE || comms.getRemoteHeartbeatMode() == CommunicationProtocol::HeartbeatMode::SLOW)
+                {
+                    transitionState(State::ACTIVE);
+                }
             }
             else
             {
@@ -433,33 +456,41 @@ void handleMessage()
                 stepper2.setSpeed(-4 * y);
                 if (x == 0 and y == 0)
                 {
-                    if (stepper.currentPosition() < xMin)
+                    if (stepper.currentPosition() < endstops.xMin)
                     {
-                        xMin = stepper.currentPosition();
+                        endstops.xMin = stepper.currentPosition();
                     }
-                    else if (stepper.currentPosition() > xMax)
+                    else if (stepper.currentPosition() > endstops.xMax)
                     {
-                        xMax = stepper.currentPosition();
+                        endstops.xMax = stepper.currentPosition();
                     }
-                    if (stepper2.currentPosition() < yMin)
+                    if (-stepper2.currentPosition() < endstops.yMin)
                     {
-                        yMin = stepper2.currentPosition();
+                        endstops.yMin = -stepper2.currentPosition();
                     }
-                    else if (stepper2.currentPosition() > yMax)
+                    else if (-stepper2.currentPosition() > endstops.yMax)
                     {
-                        yMax = stepper2.currentPosition();
+                        endstops.yMax = -stepper2.currentPosition();
                     }
 
 #ifdef DEBUG
-                    Serial.print("X: ");
-                    Serial.print(xMin);
-                    Serial.print(" - ");
-                    Serial.print(xMax);
+                    Serial.print("Position: ");
+                    Serial.print(stepper.currentPosition());
+                    Serial.print(" ");
+                    Serial.println(-stepper2.currentPosition());
+                    Serial.print("New Endstops - X: ");
+                    Serial.print(endstops.xMin);
+                    Serial.print(" ");
+                    Serial.print(endstops.xMax);
                     Serial.print(" Y: ");
-                    Serial.print(yMin);
-                    Serial.print(" - ");
-                    Serial.println(yMax);
+                    Serial.print(endstops.yMin);
+                    Serial.print(" ");
+                    Serial.println(endstops.yMax);
 #endif
+                }
+                else
+                {
+                    t.reset(sleepTimer);
                 }
             }
         }
@@ -493,37 +524,15 @@ void setup()
     LoRa.onReceive(onReceive);
     LoRa.receive();
 
-//     EEPROM.begin(256);
-//     EEPROM.get(0, endstops);
-//     xMax = endstops.xMax;
-//     yMax = endstops.yMax;
-//     xMin = endstops.xMin;
-//     yMin = endstops.yMin;
-// #ifdef DEBUG
-//     Serial.print("Endstops loaded from EEPROM: X: ");
-//     Serial.print(xMin);
-//     Serial.print(" - ");
-//     Serial.print(xMax);
-//     Serial.print(" Y: ");
-//     Serial.print(yMin);
-//     Serial.print(" - ");
-//     Serial.println(yMax);
-// #endif
-//     EEPROM.get(200, position);
-//     stepper.setCurrentPosition(position.x);
-//     stepper2.setCurrentPosition(position.y);
-// #ifdef DEBUG
-//     Serial.print("Position loaded from EEPROM: X: ");
-//     Serial.print(position.x);
-//     Serial.print(" Y: ");
-//     Serial.println(position.y);
-//#endif
+    delay(10000);
+    EEPROM.begin(512);
+    retreiveEEPROMData();
 
     // Configure Steppers
     stepper.setMaxSpeed(500);
     stepper2.setMaxSpeed(500);
-    stepper.setCurrentPosition(0);
-    stepper2.setCurrentPosition(0);
+    stepper.setCurrentPosition(position.x);
+    stepper2.setCurrentPosition(-position.y);
 
     // Configure Async timers
     heartbeatTimer = t.setInterval(sendHeartbeat, 5000);
