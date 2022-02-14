@@ -18,8 +18,7 @@ AccelStepper stepper2(AccelStepper::FULL4WIRE, 7, 11, 9, 13);
 #define NSS 5
 #define RST 17
 #define DIO 16
-//#define LED_PIN 14
-#define LED_PIN 25
+#define LED_PIN 14
 #define BATTERY_PIN A0
 
 struct Endstops
@@ -262,7 +261,7 @@ void transitionState(State newState)
             position.y = -stepper2.currentPosition();
             EEPROM.put(positionLocation, position);
             EEPROM.put(endstopLocation, endstops);
-            sleepTimer = t.setTimeout(sleepTimeout, 30000);
+            sleepTimer = t.setTimeout(sleepTimeout, 120000);
             t.cancel(timeoutTimer);
             t.setTimeout([]()
                          { sendPosition(); },
@@ -500,6 +499,7 @@ void handleMessage()
 void setup()
 {
 #ifdef DEBUG
+    delay(10000);
     Serial.begin(9600);
     Serial.println("LoRa Receiver");
 #endif
@@ -524,7 +524,6 @@ void setup()
     LoRa.onReceive(onReceive);
     LoRa.receive();
 
-    delay(10000);
     EEPROM.begin(512);
     retreiveEEPROMData();
 

@@ -19,7 +19,7 @@ void Joystick::updateStick()
         y = 0;
     }
 
-    if ((stickState != StickState::CLICKED) || (stickState != StickState::HELD))
+    if ((stickState != StickState::CLICKED) && (stickState != StickState::HELD))
     {
         if (stickState != StickState::CLEARED)
         {
@@ -93,9 +93,14 @@ void Joystick::setDeadzone(int deadzone)
     this->deadzone = deadzone;
 }
 
-Joystick::StickState Joystick::getStickState()
+Joystick::StickState Joystick::getStickState(bool clear)
 {
-    return stickState;
+    StickState tempstate = stickState;
+    if (clear)
+    {
+        stickState = StickState::CLEARED;
+    }
+    return tempstate;
 }
 
 int8_t Joystick::getStickX()
@@ -106,4 +111,18 @@ int8_t Joystick::getStickX()
 int8_t Joystick::getStickY()
 {
     return yScaled;
+}
+
+void Joystick::setStickClicked()
+{
+    stickState = StickState::CLICKED;
+}
+
+void Joystick::setStickHeld()
+{
+    stickState = StickState::HELD;
+}
+
+void Joystick::clearStick() {
+    stickState = StickState::CLEARED;
 }

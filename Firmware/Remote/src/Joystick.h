@@ -20,12 +20,15 @@ public:
         CLEARED
     };
     void updateStick();
-    StickState getStickState();
+    StickState getStickState(bool clear = true);
     int8_t getStickX();
     int8_t getStickY();
     void setDeadzone(int deadzone);
     int getDeadzone();
     void centerStick();
+    void setStickClicked();
+    void setStickHeld();
+    void clearStick();
 
 private:
     int xRaw = 0;

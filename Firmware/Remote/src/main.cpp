@@ -7,9 +7,14 @@
 #include <Yabl.h>
 
 #include "CommunicationProtocol.h"
+#include "Joystick.h"
 
+// Initializing objects
 CommunicationProtocol comms;
+Joystick stick;
 AsyncTimer t;
+Button button;
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
 
 // some variables
 int x = 0;
@@ -30,7 +35,7 @@ bool slowMode = false;
 int receivedSize = 0;
 int xPos = 0;
 int yPos = 0;
-int mirrorBattery = 0;
+float mirrorBattery = 0;
 
 enum class HeartbeatMode
 {
@@ -66,34 +71,28 @@ HeartbeatMode heartbeatMode = HeartbeatMode::INACTIVE;
 int heartbeatIndex = 0;
 byte heartbeatNibble[4] = {0, 0, 0, 0};
 int configIndex = 0;
+bool messageReceived = false;
+String message = "";
 
-// define pins
+// Define pins
+
+// Remote HW
 #define stickButtonPin 7
 #define stickX A0
 #define stickY A1
 #define battery A2
 
+// Display
 #define OLED_RST 19
 #define OLED_SDA 20
 #define OLED_SCL 21
 
+// LoRa Radio
 #define NSS 5
 #define RST 17
 #define DIO 16
 
-#define ActiveFlag 1 << 7
-#define SlowModeFlag 1 << 6
-#define ConfigureFlag 1 << 5
-#define ConfirmFlag 1 << 4
-
-#define InactiveMode 0b00 << 6
-#define ActiveMode 0b01 << 6
-#define SlowMode 0b10 << 6
-#define ConfigureMode 0b11 << 6
-#define ModeMask 0b11 << 6
-#define HeartbeatIndexMask 0b11 << 4
-#define DataNibbleMask 0b1111
-
+// XMP Images
 #define yee_width 64
 #define yee_height 64
 static unsigned char yee_bits[] = {
@@ -188,41 +187,8 @@ static unsigned char yeeqr_bits[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-bool messageReceived = false;
-String message = "";
-
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
-Button button;
-
+// Function prototype
 void transitionState(State newState);
-
-// void parseHeartbeat(byte heartbeat)
-// {
-//   heartbeatMode = (HeartbeatMode)((heartbeat & ModeMask) >> 6);
-//   heartbeatIndex = (heartbeat & HeartbeatIndexMask) >> 4;
-//   if (heartbeatMode != HeartbeatMode::CONFIGURE)
-//   {
-//     heartbeatNibble[heartbeatIndex] = heartbeat & DataNibbleMask;
-//   }
-//   else
-//   {
-//     configIndex = heartbeat & DataNibbleMask;
-//   }
-//   Serial.print("Mode: ");
-//   Serial.print(int(heartbeatMode), BIN);
-//   Serial.print(" Index: ");
-//   Serial.print(heartbeatIndex);
-//   if (heartbeatMode != HeartbeatMode::CONFIGURE)
-//   {
-//     Serial.print(" Data: ");
-//     Serial.println(heartbeatNibble[heartbeatIndex], BIN);
-//   }
-//   else
-//   {
-//     Serial.print(" Config Index: ");
-//     Serial.println(configIndex);
-//   }
-// }
 
 void sendHeartbeat()
 {
@@ -235,7 +201,6 @@ void sendHeartbeat()
 void onReceive(int packetSize)
 {
   digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-  // read packet
   for (int i = 0; i < packetSize; i++)
   {
     message.concat((char)LoRa.read());
@@ -248,50 +213,55 @@ void handleMessage()
 {
   if (messageReceived)
   {
-    // Serial.print("Message received: ");
-    // Serial.println(message[0], BIN);
     if (receivedSize == 1)
     {
       comms.parseHeartbeat(message[0]);
-    }
-    switch (state)
-    {
-    case State::CONNECTING:
-      transitionState(State::ACTIVE);
-      sendHeartbeat();
-      break;
-    case State::ACTIVE:
-      if (receivedSize == 1)
+      switch (comms.getRemoteHeartbeatMode())
       {
-        switch (comms.getRemoteHeartbeatMode())
+      case CommunicationProtocol::HeartbeatMode::ACTIVE:
+        transitionState(State::ACTIVE);
+        slowMode = false;
+        break;
+      case CommunicationProtocol::HeartbeatMode::INACTIVE:
+        if (state != State::CONNECTING)
         {
-        case CommunicationProtocol::HeartbeatMode::INACTIVE:
-          transitionState(State::IDLE);
-          break;
-        case CommunicationProtocol::HeartbeatMode::ACTIVE:
-          slowMode = false;
-          break;
-        case CommunicationProtocol::HeartbeatMode::SLOW:
-          slowMode = true;
-          break;
+        transitionState(State::IDLE);
         }
+        else {
+          transitionState(State::ACTIVE);
+          sendHeartbeat();
+        }
+        break;
+      case CommunicationProtocol::HeartbeatMode::SLOW:
+        transitionState(State::ACTIVE);
+        slowMode = true;
+        break;
+      case CommunicationProtocol::HeartbeatMode::CONFIGURE:
+        if (comms.getRemoteHeartbeatConfigIndex() == 0b0001)
+        {
+          transitionState(State::CALIBRATE);
+        }
+        else
+        {
+          transitionState(State::SETTINGSMENU);
+        }
+        break;
       }
-      else if (receivedSize == 2)
-      {
-        xPos = int8_t(message[0]);
-        yPos = int8_t(message[1]);
-        xPos = map(xPos, -100, 100, 0, 64);
-        Serial.print("xPos: ");
-        Serial.println(xPos);
-        yPos = map(yPos, -100, 100, 0, 64);
-        Serial.print("yPos: ");
-        Serial.println(yPos);
-      }
-      break;
     }
-    message = "";
-    messageReceived = false;
+    else if (receivedSize == 2 && state == State::ACTIVE)
+    {
+      xPos = int8_t(message[0]);
+      yPos = int8_t(message[1]);
+      xPos = map(xPos, -100, 100, 0, 64);
+      Serial.print("xPos: ");
+      Serial.println(xPos);
+      yPos = map(yPos, -100, 100, 0, 64);
+      Serial.print("yPos: ");
+      Serial.println(yPos);
+    }
   }
+  message = "";
+  messageReceived = false;
 }
 
 void transitionState(State newState)
@@ -320,6 +290,7 @@ void transitionState(State newState)
   case State::SETTINGSMENU:
     comms.setHeartbeatMode(CommunicationProtocol::HeartbeatMode::CONFIGURE);
     state = State::SETTINGSMENU;
+    stick.clearStick();
     sendHeartbeat();
     break;
   case State::SETTINGADJUST:
@@ -344,8 +315,8 @@ void sendControlPacket()
   if ((state == State::ACTIVE || state == State::CALIBRATE) && !zeroSent)
   {
     LoRa.beginPacket();
-    LoRa.write(xSend);
-    LoRa.write(ySend);
+    LoRa.write(stick.getStickX());
+    LoRa.write(stick.getStickY());
     LoRa.endPacket();
     LoRa.receive();
     // Serial.print("Sent: ");
@@ -353,7 +324,7 @@ void sendControlPacket()
     // Serial.print(", ");
     // Serial.println(ySend);
   }
-  if (xSend == 0 && ySend == 0)
+  if (stick.getStickX() == 0 && stick.getStickY() == 0)
   {
     zeroSent = true;
   }
@@ -363,100 +334,29 @@ void sendControlPacket()
   }
 }
 
-void centerStick()
-{
-  delay(100);
-  x_center = analogRead(stickX);
-  x_center = map(x_center, 0, 4095, 0, 255);
-  y_center = analogRead(stickY);
-  y_center = map(y_center, 0, 4095, 0, 255);
-}
 
-void getStick()
-{
-  x = analogRead(stickX);
-  x = map(x, 0, 4095, 0, 255);
-  y = analogRead(stickY);
-  y = map(y, 0, 4095, 0, 255);
-  x -= x_center;
-  y -= y_center;
-  battery_ = analogRead(battery);
-
-  // Add deadzone
-  if (abs(x) < deadzone)
-  {
-    x = 0;
-  }
-  if (abs(y) < deadzone)
-  {
-    y = 0;
-  }
-
-  if (stickState != StickState::CLICKED)
-  {
-    if (stickState != StickState::CLEARED)
-    {
-      if (y > 0)
-      {
-        stickState = StickState::UP;
-      }
-      else if (y < 0)
-      {
-        stickState = StickState::DOWN;
-      }
-      else
-      {
-        stickState = StickState::CENTERED;
-      }
-    }
-    else
-    {
-      if (y == 0)
-      {
-        stickState = StickState::CENTERED;
-      }
-    }
-  }
-
-  xSend = int8_t(map(x, 0, 255, 0, 200));
-  ySend = int8_t(map(y, 0, 255, 0, 200));
-}
 
 void stickClicked()
 {
-  switch (state)
-  {
-  case State::IDLE:
-    transitionState(State::CONNECTING);
-    break;
-  case State::ACTIVE:
-    slowMode = !slowMode;
-    transitionState(State::ACTIVE);
-    sendHeartbeat();
-    break;
-  case State::SETTINGSMENU:
-  case State::SETTINGADJUST:
-  case State::CALIBRATE:
-    stickState = StickState::CLICKED;
-    break;
-  }
+  stick.setStickClicked();
 }
 
 void stickHeld()
 {
-  switch (state)
-  {
-  case State::ACTIVE:
-    transitionState(State::SETTINGSMENU);
-    break;
-  case State::CONNECTING:
-    transitionState(State::IDLE);
-    sendHeartbeat();
-    break;
-  case State::SETTINGSMENU:
-    transitionState(State::ACTIVE);
-    sendHeartbeat();
-  }
+  // switch (state)
+  // {
+  // case State::ACTIVE:
+  //   transitionState(State::SETTINGSMENU);
+  //   break;
+  // case State::CONNECTING:
+  //   transitionState(State::IDLE);
+  //   sendHeartbeat();
+  //   break;
+  // case State::SETTINGSMENU:
+  //   transitionState(State::ACTIVE);
+  //   sendHeartbeat();
+  // }
+  stick.setStickHeld();
 }
 
 void displayIdle()
@@ -471,12 +371,16 @@ void displayIdle()
     u8g2.setFont(u8g2_font_helvB12_tr);
   }
   u8g2.setCursor(80, 42);
-  u8g2.print(battery_);
-  u8g2.setCursor(80, 52);
-  if (comms.getRemoteHeartbeatData() != 0){
-    mirrorBattery = comms.getRemoteHeartbeatData();
+  u8g2.print(float(battery_) / 4095 * 3.3 * 2);
+  u8g2.setCursor(80, 54);
+  if (comms.getRemoteHeartbeatData() != 0)
+  {
+    mirrorBattery = float(comms.getRemoteHeartbeatData()) / 4095 * 3.3 * 2;
   }
   u8g2.print(mirrorBattery);
+  if (stick.getStickState() == Joystick::StickState::CLICKED){
+    transitionState(State::CONNECTING);
+  }
 }
 
 void displayActive()
@@ -485,6 +389,14 @@ void displayActive()
   u8g2.drawHLine(0, 64 - yPos, 64);
   u8g2.drawVLine(xPos, 0, 64);
   u8g2.drawLine(32, 32, xPos, 64 - yPos);
+  if (stick.getStickState(false) == Joystick::StickState::CLICKED){
+    slowMode = !slowMode;
+    transitionState(State::ACTIVE);
+    sendHeartbeat();
+  }
+  if (stick.getStickState() == Joystick::StickState::HELD){
+    transitionState(State::SETTINGSMENU);
+  }
   if (slowMode)
   {
     u8g2.drawStr(70, 20, "Slow");
@@ -493,6 +405,9 @@ void displayActive()
 void displayConnecting()
 {
   u8g2.drawStr(0, 20, "Connecting...");
+  if (stick.getStickState() == Joystick::StickState::HELD){
+    transitionState(State::IDLE);
+  }
 }
 
 void displaySettings()
@@ -508,21 +423,32 @@ void displaySettings()
     u8g2.drawGlyph(u8g2.getDisplayWidth() - 12, u8g2.getDisplayHeight(), 0x007D);
   }
   u8g2.setFont(u8g2_font_helvB12_tr);
-  if (stickState == StickState::UP && menuCounter >= 1)
+  switch (stick.getStickState(false))
   {
-    menuCounter--;
-    stickState = StickState::CLEARED;
-  }
-  else if (stickState == StickState::DOWN && menuCounter <= menuItems - 2)
-  {
-    menuCounter++;
-    stickState = StickState::CLEARED;
-  }
-  else if (stickState == StickState::CLICKED)
-  {
+  case Joystick::StickState::UP:
+    if (menuCounter >= 1)
+    {
+      menuCounter--;
+    }
+    stick.clearStick();
+    break;
+  case Joystick::StickState::DOWN:
+    if (menuCounter <= menuItems - 2)
+    {
+      menuCounter++;
+    }
+    stick.clearStick();
+    break;
+  case Joystick::StickState::CLICKED:
     transitionState(State::SETTINGADJUST);
     settingVariable = -1;
-    stickState = StickState::CLEARED;
+    stick.clearStick();
+    break;
+    case Joystick::StickState::HELD:
+    transitionState(State::ACTIVE);
+    sendHeartbeat();
+    stick.clearStick();
+    break;
   }
   if (menuCounter >= 1)
   {
@@ -546,7 +472,7 @@ void displaySettingAdjust()
                  { transitionState(State::SETTINGAPPLY); },
                  1000);
     t.setTimeout([]()
-                 { centerStick(); },
+                 { stick.centerStick(); },
                  500);
     break;
   case 2:
@@ -621,7 +547,7 @@ void displaySettingApply()
 void displayCalibrate()
 {
   u8g2.drawStr(0, 20, "Calibrating...");
-  if (stickState == StickState::CLICKED)
+  if (stick.getStickState() == Joystick::StickState::CLICKED)
   {
     transitionState(State::SETTINGAPPLY);
     stickState = StickState::CLEARED;
@@ -685,8 +611,6 @@ void setup()
   LoRa.receive();
 
   // Setup Stick Interrupts
-  //  attachInterrupt(digitalPinToInterrupt(stickButtonPin), stickClicked, FALLING);
-  //  pinMode(stickButtonPin, INPUT_PULLUP);
   button.attach(stickButtonPin, INPUT_PULLUP);
   button.callback(stickClicked, SINGLE_TAP);
   button.callback(stickHeld, HOLD);
@@ -701,13 +625,14 @@ void setup()
   Wire.setSCL(OLED_SCL);
   u8g2.begin();
   u8g2.setFont(u8g2_font_helvB12_tr);
-  centerStick();
+  stick.centerStick();
 }
 
 void loop()
 {
   handleMessage();
-  getStick();
+  stick.updateStick();
   t.handle();
   button.update();
+  battery_ = analogRead(battery);
 }
