@@ -17,36 +17,26 @@ Button button;
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
 
 // some variables
-int x = 0;
-int y = 0;
-int x_center = 0;
-int y_center = 0;
-int deadzone = 20;
-int battery_ = 0;
-int8_t xSend;
-int8_t ySend;
-byte statusFlags = 0;
+int remoteBatteryRaw = 0;
+float remoteBatteryVoltage = 0;
 bool zeroSent = false;
-String configStrings[6]{"Sleep", "Center Stick", "Calibrate", "Set Deadzone", "Option 5", "Option 6"};
-int menuItems = 6;
-int menuCounter = 0;
+String configStrings[6]{"Sleep", "Battery", "Calibrate", "Center Stick", "Deadzone", "About"};
+int menuItemsCount = 6;
+int menuIndex = 0;
+int aboutIndex = 0;
+int aboutItemsCount = 6;
 int settingVariable = 0;
 bool slowMode = false;
 int receivedSize = 0;
 int xPos = 0;
 int yPos = 0;
 float mirrorBattery = 0;
-
-enum class HeartbeatMode
-{
-  INACTIVE,
-  ACTIVE,
-  SLOW,
-  CONFIGURE
-};
+int heartbeatReceiveTimeout = 0;
+bool heartbeatReceived = true;
 
 enum class State
 {
+  BOOT,
   IDLE,
   CONNECTING,
   ACTIVE,
@@ -56,20 +46,7 @@ enum class State
   CALIBRATE
 };
 
-enum class StickState
-{
-  UP,
-  DOWN,
-  CLICKED,
-  CENTERED,
-  CLEARED,
-};
-
-State state = State::IDLE;
-StickState stickState = StickState::CENTERED;
-HeartbeatMode heartbeatMode = HeartbeatMode::INACTIVE;
-int heartbeatIndex = 0;
-byte heartbeatNibble[4] = {0, 0, 0, 0};
+State state = State::BOOT;
 int configIndex = 0;
 bool messageReceived = false;
 String message = "";
@@ -80,7 +57,7 @@ String message = "";
 #define stickButtonPin 7
 #define stickX A0
 #define stickY A1
-#define battery A2
+#define batteryPin A2
 
 // Display
 #define OLED_RST 19
@@ -187,7 +164,7 @@ static unsigned char yeeqr_bits[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-// Function prototype
+// Function prototype required for compilation
 void transitionState(State newState);
 
 void sendHeartbeat()
@@ -198,6 +175,7 @@ void sendHeartbeat()
   LoRa.receive();
 }
 
+// LoRa received packet IRQ
 void onReceive(int packetSize)
 {
   digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
@@ -209,13 +187,17 @@ void onReceive(int packetSize)
   messageReceived = true;
 }
 
+// Handle received messages
 void handleMessage()
 {
   if (messageReceived)
   {
+    // Single bytes are always heartbeats
     if (receivedSize == 1)
     {
+      // Remote always works to match state received in mirror heartbeat
       comms.parseHeartbeat(message[0]);
+      heartbeatReceived = true;
       switch (comms.getRemoteHeartbeatMode())
       {
       case CommunicationProtocol::HeartbeatMode::ACTIVE:
@@ -225,9 +207,10 @@ void handleMessage()
       case CommunicationProtocol::HeartbeatMode::INACTIVE:
         if (state != State::CONNECTING)
         {
-        transitionState(State::IDLE);
+          transitionState(State::IDLE);
         }
-        else {
+        else
+        {
           transitionState(State::ACTIVE);
           sendHeartbeat();
         }
@@ -253,17 +236,20 @@ void handleMessage()
       xPos = int8_t(message[0]);
       yPos = int8_t(message[1]);
       xPos = map(xPos, -100, 100, 0, 64);
+      yPos = map(yPos, -100, 100, 0, 64);
+#ifdef DEBUG
       Serial.print("xPos: ");
       Serial.println(xPos);
-      yPos = map(yPos, -100, 100, 0, 64);
       Serial.print("yPos: ");
       Serial.println(yPos);
+#endif
     }
   }
   message = "";
   messageReceived = false;
 }
 
+// Handles all state machine transitions
 void transitionState(State newState)
 {
   switch (newState)
@@ -319,10 +305,6 @@ void sendControlPacket()
     LoRa.write(stick.getStickY());
     LoRa.endPacket();
     LoRa.receive();
-    // Serial.print("Sent: ");
-    // Serial.print(xSend);
-    // Serial.print(", ");
-    // Serial.println(ySend);
   }
   if (stick.getStickX() == 0 && stick.getStickY() == 0)
   {
@@ -334,8 +316,7 @@ void sendControlPacket()
   }
 }
 
-
-
+// Used to interface with the button library
 void stickClicked()
 {
   stick.setStickClicked();
@@ -343,42 +324,90 @@ void stickClicked()
 
 void stickHeld()
 {
-  // switch (state)
-  // {
-  // case State::ACTIVE:
-  //   transitionState(State::SETTINGSMENU);
-  //   break;
-  // case State::CONNECTING:
-  //   transitionState(State::IDLE);
-  //   sendHeartbeat();
-  //   break;
-  // case State::SETTINGSMENU:
-  //   transitionState(State::ACTIVE);
-  //   sendHeartbeat();
-  // }
   stick.setStickHeld();
 }
 
-void displayIdle()
+// DISPLAY FUNCTIONS
+
+// Prints a battery icon based on voltage
+// Likely needs to be much better calibrated
+void drawBatteryIcon(float batteryVoltage, int x, int y)
 {
-  // u8g2.drawStr(0, 20, "Idle");
-  u8g2.drawXBM(0, 0, 64, 64, yee_bits);
-  // u8g2.drawXBM(64,0,64,64, yeeqr_bits);
-  if (battery_ > 2500)
+  int iconOffset = 0;
+  if (batteryVoltage < 3.5)
   {
-    u8g2.setFont(u8g2_font_battery19_tn);
-    u8g2.drawGlyph(100, 20, 0x0036);
-    u8g2.setFont(u8g2_font_helvB12_tr);
+    iconOffset = 0;
   }
-  u8g2.setCursor(80, 42);
-  u8g2.print(float(battery_) / 4095 * 3.3 * 2);
-  u8g2.setCursor(80, 54);
+  else if (batteryVoltage < 3.6)
+  {
+    iconOffset = 1;
+  }
+  else if (batteryVoltage < 3.65)
+  {
+    iconOffset = 2;
+  }
+  else if (batteryVoltage < 3.70)
+  {
+    iconOffset = 3;
+  }
+  else if (batteryVoltage < 3.75)
+  {
+    iconOffset = 4;
+  }
+  else if (batteryVoltage < 4.2)
+  {
+    iconOffset = 5;
+  }
+  else if (batteryVoltage >= 4.2)
+  {
+    iconOffset = 6;
+  }
+  u8g2.setFont(u8g2_font_battery19_tn);
+  u8g2.drawGlyph(x, y, 0x0030 + iconOffset);
+  u8g2.setFont(u8g2_font_helvB12_tr);
+}
+
+void drawHUD()
+{
+  remoteBatteryVoltage = float(remoteBatteryRaw) / 4095 * 3.3 * 2;
+  drawBatteryIcon(remoteBatteryVoltage, 116, 42);
+
   if (comms.getRemoteHeartbeatData() != 0)
   {
     mirrorBattery = float(comms.getRemoteHeartbeatData()) / 4095 * 3.3 * 2;
   }
-  u8g2.print(mirrorBattery);
-  if (stick.getStickState() == Joystick::StickState::CLICKED){
+  drawBatteryIcon(mirrorBattery, 116, 64);
+  u8g2.setFont(u8g2_font_iconquadpix_m_all);
+  u8g2.drawGlyph(100, 64, 0x004a);
+  u8g2.drawGlyph(100, 42, 0x0071);
+  u8g2.setFont(u8g2_font_streamline_all_t);
+  if (heartbeatReceived)
+  {
+    u8g2.drawGlyph(108, 21, 0x0142);
+  }
+  else
+  {
+    u8g2.drawGlyph(108, 21, 0x01e2);
+  }
+}
+
+void displayBoot()
+{
+  u8g2.setFont(u8g2_font_helvB12_tr);
+  u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 + 6, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "LoRa Mirror");
+  u8g2.setFont(u8g2_font_helvB10_tr);
+  u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 + 30, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "mikaeel.io");
+}
+
+void displayIdle()
+{
+  u8g2.setFont(u8g2_font_helvB12_tr);
+  u8g2.drawStr(0, 16, "Click to start");
+
+  drawHUD();
+
+  if (stick.getStickState() == Joystick::StickState::CLICKED)
+  {
     transitionState(State::CONNECTING);
   }
 }
@@ -389,23 +418,31 @@ void displayActive()
   u8g2.drawHLine(0, 64 - yPos, 64);
   u8g2.drawVLine(xPos, 0, 64);
   u8g2.drawLine(32, 32, xPos, 64 - yPos);
-  if (stick.getStickState(false) == Joystick::StickState::CLICKED){
+  drawHUD();
+  if (stick.getStickState(false) == Joystick::StickState::CLICKED)
+  {
     slowMode = !slowMode;
     transitionState(State::ACTIVE);
     sendHeartbeat();
   }
-  if (stick.getStickState() == Joystick::StickState::HELD){
+  if (stick.getStickState() == Joystick::StickState::HELD)
+  {
     transitionState(State::SETTINGSMENU);
   }
   if (slowMode)
   {
-    u8g2.drawStr(70, 20, "Slow");
+    u8g2.setFont(u8g2_font_helvB12_tr);
+    u8g2.drawStr(66, 16, "Slow");
   }
 }
 void displayConnecting()
 {
-  u8g2.drawStr(0, 20, "Connecting...");
-  if (stick.getStickState() == Joystick::StickState::HELD){
+  u8g2.setFont(u8g2_font_helvB12_tf);
+  u8g2.drawStr(0, 16, "Connecting...");
+  u8g2.drawStr(0, 38, "Please Wait");
+  drawHUD();
+  if (stick.getStickState() == Joystick::StickState::HELD)
+  {
     transitionState(State::IDLE);
   }
 }
@@ -414,11 +451,11 @@ void displaySettings()
 {
   u8g2.setFont(u8g2_font_twelvedings_t_all);
   u8g2.drawGlyph(1, 11, 0x0047);
-  if (menuCounter >= 2)
+  if (menuIndex >= 2)
   {
     u8g2.drawGlyph(u8g2.getDisplayWidth() - 12, 11, 0x007B);
   }
-  if (menuCounter <= menuItems - 3)
+  if (menuIndex <= menuItemsCount - 3)
   {
     u8g2.drawGlyph(u8g2.getDisplayWidth() - 12, u8g2.getDisplayHeight(), 0x007D);
   }
@@ -426,16 +463,16 @@ void displaySettings()
   switch (stick.getStickState(false))
   {
   case Joystick::StickState::UP:
-    if (menuCounter >= 1)
+    if (menuIndex >= 1)
     {
-      menuCounter--;
+      menuIndex--;
     }
     stick.clearStick();
     break;
   case Joystick::StickState::DOWN:
-    if (menuCounter <= menuItems - 2)
+    if (menuIndex <= menuItemsCount - 2)
     {
-      menuCounter++;
+      menuIndex++;
     }
     stick.clearStick();
     break;
@@ -444,30 +481,54 @@ void displaySettings()
     settingVariable = -1;
     stick.clearStick();
     break;
-    case Joystick::StickState::HELD:
+  case Joystick::StickState::HELD:
     transitionState(State::ACTIVE);
     sendHeartbeat();
     stick.clearStick();
     break;
   }
-  if (menuCounter >= 1)
+  if (menuIndex >= 1)
   {
-    u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 - 16, U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, configStrings[menuCounter - 1].c_str());
+    u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 - 16, U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, configStrings[menuIndex - 1].c_str());
   }
-  u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 + 6, U8G2_BTN_INV | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, configStrings[menuCounter].c_str());
-  if (menuCounter <= menuItems - 2)
+  u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 + 6, U8G2_BTN_INV | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, configStrings[menuIndex].c_str());
+  if (menuIndex <= menuItemsCount - 2)
   {
-    u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 + 28, U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, configStrings[menuCounter + 1].c_str());
+    u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 + 28, U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, configStrings[menuIndex + 1].c_str());
   }
 }
 
 void displaySettingAdjust()
 {
-  switch (menuCounter)
+  switch (menuIndex)
   {
   case 1:
-    u8g2.drawStr(0, 20, "Centering Stick");
-    u8g2.drawStr(0, 40, "Do not touch");
+    u8g2.setFont(u8g2_font_helvB12_tr);
+    u8g2.drawStr(0, 16, "Batteries");
+    remoteBatteryVoltage = float(remoteBatteryRaw) / 4095 * 3.3 * 2;
+    if (comms.getRemoteHeartbeatData() != 0)
+    {
+      mirrorBattery = float(comms.getRemoteHeartbeatData()) / 4095 * 3.3 * 2;
+    }
+    u8g2.setCursor(0, 38);
+    u8g2.print("Remote: ");
+    u8g2.print(remoteBatteryVoltage);
+    u8g2.print("V");
+    u8g2.setCursor(0, 60);
+    u8g2.print("Mirror: ");
+    u8g2.print(mirrorBattery);
+    u8g2.print("V");
+    if (stick.getStickState() == Joystick::StickState::CLICKED)
+    {
+      transitionState(State::SETTINGAPPLY);
+    }
+    break;
+  case 2:
+    transitionState(State::CALIBRATE);
+    break;
+  case 3:
+    u8g2.drawStr(0, 16, "Centering Stick");
+    u8g2.drawStr(0, 38, "Do not touch");
     t.setTimeout([]()
                  { transitionState(State::SETTINGAPPLY); },
                  1000);
@@ -475,32 +536,113 @@ void displaySettingAdjust()
                  { stick.centerStick(); },
                  500);
     break;
-  case 2:
-    transitionState(State::CALIBRATE);
-  case 3:
+  case 4:
     if (settingVariable == -1)
     {
-      settingVariable = deadzone;
+      settingVariable = stick.getDeadzone();
     }
-    if (stickState == StickState::UP && settingVariable < 64)
+    if (stick.getStickState(false) == Joystick::StickState::UP && settingVariable < 64)
     {
       settingVariable++;
-      stickState = StickState::CLEARED;
+      stick.clearStick();
     }
-    else if (stickState == StickState::DOWN && settingVariable > 1)
+    else if (stick.getStickState(false) == Joystick::StickState::DOWN && settingVariable > 1)
     {
       settingVariable--;
-      stickState = StickState::CLEARED;
+      stick.clearStick();
     }
-    else if (stickState == StickState::CLICKED)
+    else if (stick.getStickState(false) == Joystick::StickState::CLICKED)
     {
-      deadzone = settingVariable;
+      stick.setDeadzone(settingVariable);
       transitionState(State::SETTINGAPPLY);
-      stickState = StickState::CLEARED;
+      stick.clearStick();
     }
-    u8g2.drawStr(0, 20, "Deadzone");
-    u8g2.drawStr(0, 40, ("Current: " + String(deadzone)).c_str());
+    u8g2.drawStr(0, 16, "Deadzone");
+    u8g2.drawStr(0, 38, ("Current: " + String(stick.getDeadzone())).c_str());
     u8g2.drawStr(0, 60, ("New: " + String(settingVariable)).c_str());
+    break;
+  case 5:
+    switch (stick.getStickState(false))
+    {
+    case Joystick::StickState::UP:
+      if (aboutIndex >= 1)
+      {
+        aboutIndex--;
+      }
+      stick.clearStick();
+      break;
+    case Joystick::StickState::DOWN:
+      if (aboutIndex <= aboutItemsCount - 1)
+      {
+        aboutIndex++;
+      }
+      stick.clearStick();
+      break;
+    case Joystick::StickState::CLICKED:
+      transitionState(State::SETTINGSMENU);
+      stick.clearStick();
+      break;
+    case Joystick::StickState::HELD:
+      transitionState(State::SETTINGAPPLY);
+      sendHeartbeat();
+      stick.clearStick();
+      break;
+    }
+    u8g2.setFont(u8g2_font_twelvedings_t_all);
+    if (aboutIndex > 0)
+    {
+      u8g2.drawGlyph(u8g2.getDisplayWidth() - 12, 11, 0x007B);
+    }
+    if (aboutIndex <= aboutItemsCount - 2)
+    {
+      u8g2.drawGlyph(u8g2.getDisplayWidth() - 12, u8g2.getDisplayHeight(), 0x007D);
+    }
+    u8g2.setFont(u8g2_font_helvB12_tr);
+    switch (aboutIndex)
+    {
+    case 0:
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "LoRa Mirror");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, u8g2.getDisplayHeight() / 2 + 18, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "V1.0");
+      break;
+    case 1:
+      u8g2.setFont(u8g2_font_helvB10_tr);
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, 10, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "Made with");
+      u8g2.setFont(u8g2_font_streamline_all_t);
+      u8g2.drawGlyph(56, 34, 0x017A);
+      u8g2.setFont(u8g2_font_helvB10_tr);
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, 46, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "by Mikaeel");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, 62, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "@ The OC Lab");
+      break;
+    case 2:
+      u8g2.setFont(u8g2_font_helvB10_tr);
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 2, 12, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth(), 0, 1, "Thanks to");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 4, 26, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth()/2, 0, 1, "Shivun");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 4 * 3, 26, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth()/2, 0, 1, "Alice");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 4, 40, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth()/2, 0, 1, "Kim");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 4 * 3, 40, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth()/2, 0, 1, "Fortune");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 4, 54, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth()/2, 0, 1, "Mitch");
+      u8g2.drawButtonUTF8(u8g2.getDisplayWidth() / 4 * 3, 54, U8G2_BTN_BW0 | U8G2_BTN_HCENTER, u8g2.getDisplayWidth()/2, 0, 1, "Steve");
+      break;
+    case 3:
+    u8g2.setFont(u8g2_font_helvB12_tr);
+      u8g2.drawStr(0, 12, "For all the:");
+      u8g2.drawStr(0, 30, "help, lunches,");
+      u8g2.drawStr(0, 48, "and fun times!");
+      break;
+    case 4:
+    u8g2.setFont(u8g2_font_helvB12_tr);
+      u8g2.drawStr(0, 12, "P.S:");
+      u8g2.drawStr(0, 30, "Hold down");
+      u8g2.drawStr(0, 48, "the stick");
+      break;
+    case 5:
+    u8g2.setFont(u8g2_font_helvB12_tr);
+      u8g2.drawStr(0, 12, "You're still");
+      u8g2.drawStr(0, 28, "here?");
+      u8g2.drawStr(0, 48, "It's over.");
+      u8g2.drawStr(0, 64, "Go home.");
+      break;
+    }
     break;
   default:
     transitionState(State::SETTINGAPPLY);
@@ -510,33 +652,42 @@ void displaySettingAdjust()
 
 void displaySettingApply()
 {
-  switch (menuCounter)
+  switch (menuIndex)
   {
   case 0:
-    u8g2.drawStr(0, 20, "Sleeping");
+    u8g2.drawStr(0, 16, "Sleeping");
     t.setTimeout([]()
                  {
                          transitionState(State::IDLE);
                          sendHeartbeat(); },
                  1000);
     break;
-  case 1:
-    u8g2.drawStr(0, 20, "Centered");
-    t.setTimeout([]()
-                 { transitionState(State::SETTINGSMENU); },
-                 1000);
-    break;
   case 2:
-    u8g2.drawStr(0, 20, "Saving");
+    u8g2.drawStr(0, 16, "Saving");
     comms.setHeartbeatConfigIndex(0b1111);
     t.setTimeout([]()
                  { transitionState(State::SETTINGSMENU); },
                  1000);
+    break;
   case 3:
-    u8g2.drawStr(0, 20, "Deadzone set");
+    u8g2.drawStr(0, 16, "Centered");
     t.setTimeout([]()
                  { transitionState(State::SETTINGSMENU); },
                  1000);
+    break;
+  case 4:
+    u8g2.drawStr(0, 16, "Deadzone set");
+    t.setTimeout([]()
+                 { transitionState(State::SETTINGSMENU); },
+                 1000);
+    break;
+  case 5:
+    u8g2.drawXBM(0, 0, 64, 64, yee_bits);
+    u8g2.drawXBM(64, 0, 64, 64, yeeqr_bits);
+    if (stick.getStickState() == Joystick::StickState::CLICKED)
+    {
+      transitionState(State::SETTINGSMENU);
+    }
     break;
   default:
     transitionState(State::SETTINGSMENU);
@@ -546,19 +697,23 @@ void displaySettingApply()
 
 void displayCalibrate()
 {
-  u8g2.drawStr(0, 20, "Calibrating...");
+  u8g2.setFont(u8g2_font_helvB12_tr);
+  u8g2.drawStr(0, 16, "Calibrating...");
   if (stick.getStickState() == Joystick::StickState::CLICKED)
   {
     transitionState(State::SETTINGAPPLY);
-    stickState = StickState::CLEARED;
   }
 }
 
+// Updates display based on state machine
 void updateDisplay()
 {
   u8g2.clearBuffer();
   switch (state)
   {
+  case State::BOOT:
+    displayBoot();
+    break;
   case State::IDLE:
     displayIdle();
     break;
@@ -586,8 +741,10 @@ void updateDisplay()
 
 void setup()
 {
-  // Serial for debugging
+// Serial for debugging
+#ifdef DEBUG
   Serial.begin(9600);
+#endif
 
   // Setup LoRa
   pinMode(LED_BUILTIN, OUTPUT);
@@ -598,16 +755,17 @@ void setup()
   LoRa.setPins(NSS, RST, DIO);
   if (!LoRa.begin(833E6))
   {
+#ifdef DEBUG
     Serial.println("Starting LoRa failed!");
+#endif
     while (1)
       ;
   }
-  // LoRa.setSpreadingFactor(12);
-  // LoRa.setSignalBandwidth(20.8E3);
+  // These should be tweaked as a tradeoff between data rate and range
+  //  LoRa.setSpreadingFactor(12);
+  //  LoRa.setSignalBandwidth(20.8E3);
   LoRa.setTxPower(20);
-  // Register the receive callback
   LoRa.onReceive(onReceive);
-  // Put the radio into receive mode
   LoRa.receive();
 
   // Setup Stick Interrupts
@@ -615,17 +773,26 @@ void setup()
   button.callback(stickClicked, SINGLE_TAP);
   button.callback(stickHeld, HOLD);
   button.interval(5);
+  stick.centerStick();
 
   // Initialize Async timers
   t.setInterval(sendControlPacket, 200);
   t.setInterval(updateDisplay, 50);
+  heartbeatReceiveTimeout = t.setInterval([]()
+                                          { heartbeatReceived = false; },
+                                          10000);
+  t.setTimeout([]()
+               { transitionState(State::IDLE); },
+               2000);
+  t.setInterval([]()
+                { remoteBatteryRaw = analogRead(batteryPin); },
+                1500);
 
   // Setup Display
   Wire.setSDA(OLED_SDA);
   Wire.setSCL(OLED_SCL);
   u8g2.begin();
   u8g2.setFont(u8g2_font_helvB12_tr);
-  stick.centerStick();
 }
 
 void loop()
@@ -634,5 +801,4 @@ void loop()
   stick.updateStick();
   t.handle();
   button.update();
-  battery_ = analogRead(battery);
 }
