@@ -406,9 +406,13 @@ void displayIdle()
 
   drawHUD();
 
-  if (stick.getStickState() == Joystick::StickState::CLICKED)
+  if (stick.getStickState(false) == Joystick::StickState::CLICKED)
   {
     transitionState(State::CONNECTING);
+  }
+  if (stick.getStickState() == Joystick::StickState::HELD)
+  {
+    transitionState(State::SETTINGSMENU);
   }
 }
 
