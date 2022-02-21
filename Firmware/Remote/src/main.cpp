@@ -369,7 +369,7 @@ void drawBatteryIcon(float batteryVoltage, int x, int y)
 
 void drawHUD()
 {
-  remoteBatteryVoltage = float(remoteBatteryRaw) / 4095 * 3.3 * 2;
+  remoteBatteryVoltage = float(remoteBatteryRaw) / 4095 * 3.3 * 2.22;
   drawBatteryIcon(remoteBatteryVoltage, 116, 42);
 
   if (comms.getRemoteHeartbeatData() != 0)
@@ -509,7 +509,7 @@ void displaySettingAdjust()
   case 1:
     u8g2.setFont(u8g2_font_helvB12_tr);
     u8g2.drawStr(0, 16, "Batteries");
-    remoteBatteryVoltage = float(remoteBatteryRaw) / 4095 * 3.3 * 2;
+    remoteBatteryVoltage = float(remoteBatteryRaw) / 4095 * 3.3 * 2.22;
     if (comms.getRemoteHeartbeatData() != 0)
     {
       mirrorBattery = float(comms.getRemoteHeartbeatData()) / 4095 * 3.3 * 2;
