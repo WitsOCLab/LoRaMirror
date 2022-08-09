@@ -1,2 +1,3 @@
 # LoRaMirror
-An amazing LoRaWAN powered remote mirror.
+
+A lovely LoRa powered remote controlled mirror
